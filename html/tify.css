@@ -1,0 +1,5 @@
+@import "tify/tify.css";
+
+ .tify-header {
+   display: none ! important;
+ }
