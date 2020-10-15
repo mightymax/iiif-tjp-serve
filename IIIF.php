@@ -18,7 +18,7 @@ class IIIF
         'size' => '(\^?max|\^?\d+\,|\^?\,\d+|\^?pct\:\d+|\^?!?\d+\,\d+)\/',
         'rotation' => '(!?\d+(?:\.\d+)?)\/',
         'quality' => '(default|color|gray|bitonal|native)\.',
-        'format' => '(jpg|png)'
+        'format' => '(jpg|png|tif|gif|jp2|pdf|webp)'
     );
 
     public function __construct()
@@ -120,6 +120,10 @@ class IIIF
     
     public function setFormat($format)
     {
+        $allowed_format = ['jpg'];
+        if (!in_array($format, $allowed_format)) {
+            throw new IIIF_Exception("Format `{$format}` is not implemented.", 501);
+        }
         return $this->setParam('format', $format);
     }
     
@@ -196,10 +200,17 @@ class IIIF
         $offset = ($row) * @$layer->cols + $col;
         $tile = @$layer->starttile + $offset;
 
-        header("Content-Type: image/jpeg");
         if (false === $this->debug) {
-            $this->getpic->getTile($tile, false);
+            header("Content-Type: image/jpeg");
+            if ($this->quality == 'default' || $this->quality == 'color') {
+                $this->getpic->getTile($tile, false);
+            } else {
+                $image = $this->getpic->getTile($tile);
+                $this->rotateImage($image)->setImageType($image);
+                echo $image;
+            }
         } else {
+            header("Content-Type: image/jpeg");
             $im = new Imagick();
             $im->newImage(256, 256, '#000');
             $im->BorderImage(new ImagickPixel("red") , 2,2);
@@ -334,24 +345,35 @@ class IIIF
              call_user_func_array([$image, 'adaptiveResizeImage'], $resize_args);
          }
          
-         if ($this->rotation && $this->rotation != 360) {
-             $mirror = 0 === strpos($this->rotation, '!');
-             $rotation = (float)ltrim($this->rotation, '!');
-             if ($mirror) {
-                 $image->flopImage();
-             }
-             $image->rotateImage(new ImagickPixel('#ffffff'), $rotation);
-         }
-         
-         if ($this->quality == 'gray') {
-             $image->setImageType(Imagick::IMGTYPE_GRAYSCALEMATTE);
-         } elseif ($this->quality == 'bitonal') {
-             $image->setImageType(Imagick::IMGTYPE_BILEVEL);
-         }
+        
+         $this->rotateImage($image)->setImageType($image);
          
         header("Content-Type: image/jpeg");
         echo $image;
         exit;
+    }
+    
+    protected function rotateImage(\Imagick &$image)
+    {
+        if ($this->rotation && $this->rotation != 360) {
+            $mirror = 0 === strpos($this->rotation, '!');
+            $rotation = (float)ltrim($this->rotation, '!');
+            if ($mirror) {
+                $image->flopImage();
+            }
+            $image->rotateImage(new ImagickPixel('#ffffff'), $rotation);
+        }
+        return $this;
+    }
+    
+    protected function setImageType(\Imagick &$image)
+    {
+        if ($this->quality == 'gray') {
+            $image->setImageType(Imagick::IMGTYPE_GRAYSCALEMATTE);
+        } elseif ($this->quality == 'bitonal') {
+            $image->setImageType(Imagick::IMGTYPE_BILEVEL);
+        }
+        return $this;
     }
     
     public function manifest()
