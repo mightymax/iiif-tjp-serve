@@ -1,10 +1,11 @@
 <?php
 class IIIF
 {
-    protected $basePath = '/';
+    protected $basepath = '/';
     protected $mode;
     protected $region, $size, $rotation, $quality, $format;
     protected $getpic;
+    protected $debug = false;
     
     protected $isManifest = false;
     
@@ -22,15 +23,32 @@ class IIIF
 
     public function __construct()
     {
+        if (file_exists(__DIR__ . '/config.php')) {
+            $config = include __DIR__ . '/config.php';
+            foreach ($config as $key => $val) {
+                $methodName = 'set' . ucfirst($key);
+                $func = [$this, $methodName];
+                if (is_callable($func, true, $callable_name)) {
+                    call_user_func_array($func, [$val]);
+                } else {
+                    $this->$key = $val;
+                }
+            }
+        }
     }
     
     public static function Factory () {
         return new self();
     }
     
-    public function setBasepath($basePath)
+    public function debug ($debug = true) {
+        $this->debug = (bool)$debug;
+        return $this;
+    }
+    
+    public function setBasepath($basepath)
     {
-        $this->basePath = rtrim($basePath, '/') . '/';
+        $this->basepath = rtrim($basepath, '/') . '/';
         return $this;
     }
     
@@ -43,8 +61,6 @@ class IIIF
         }
         
         $matches = array();
-        // {scheme}://{server}{/prefix}/{identifier}/{region}/{size}/{rotation}/{quality}.{format}
-        // {scheme}://{server}{/prefix}/{identifier}/info.json
         $pattern = '/\/'.implode($this->regex_pattern, '') . '/';
         if (preg_match('/(.+)\/info.json$/', $queryString, $matches)) {
             $this->setMode(self::MODE_INFO)->setFile($matches[1]);
@@ -61,14 +77,13 @@ class IIIF
     public function setFile($file)
     {
         $this->file = $file;
-        $this->getpic = new IIIF_Getpic($this->basePath . ltrim($file, '/'));
+        $this->getpic = new IIIF_Getpic($this->basepath . ltrim($file, '/'));
         return $this;
     }
     
     public function getFile($fullPath = true)
     {
         if (!$this->getpic && true === $fullPath) return;
-        
         return false === $fullPath ? $this->file : $this->getpic->getFile();
     }
     
@@ -139,133 +154,184 @@ class IIIF
         echo json_encode($info);
     }
     
+    protected function tile($getpic_info, $tiles, $sizes)
+    {
+        $regions = explode(',', $this->region);
+        list($x, $y, $w, $h) = explode(',', $this->region);
+        $x = (int)$x; $y=(int)$y; $w=(int)$w; $h=(int)$h;
+        
+        if ($this->debug) {
+            $debugTxt = "x:{$x}\ny:{$y}\nw:$w\nh:$h\nx/tw: " . ($x / $getpic_info->tilewidth);
+            $debugTxt .= "\nsize: {$this->size}\n";
+        }
+        
+        if ($w % $getpic_info->tilewidth) {
+            $w = $h;
+        }
+        if ($h % $getpic_info->tileheight) {
+            $h = $w;
+        }
+
+        $l = 0;
+        
+        for ($i = 0 ; $i < $getpic_info->layers; $i++) {
+            $l = $i+1;
+            $scale = pow($getpic_info->ratio, $l);
+
+            if ($getpic_info->width / $scale <= $w && $getpic_info->height / $scale <= $h) {
+                break;
+            }
+        }
+        
+        $l = $l+1;
+        if ($l > $getpic_info->layers) $l = $getpic_info->layers;
+        $layer = @$sizes[$l];
+
+        $scale = pow($getpic_info->ratio, $getpic_info->layers - $l);
+        $x = ($x / $scale);
+        $y = ($y / $scale);
+        $col = ($x - ($x % $getpic_info->tilewidth)) / $getpic_info->tilewidth ;
+        $row = ($y - ($y % $getpic_info->tileheight)) / $getpic_info->tileheight;
+
+        $offset = ($row) * @$layer->cols + $col;
+        $tile = @$layer->starttile + $offset;
+
+        header("Content-Type: image/jpeg");
+        if (false === $this->debug) {
+            $this->getpic->getTile($tile, false);
+        } else {
+            $im = new Imagick();
+            $im->newImage(256, 256, '#000');
+            $im->BorderImage(new ImagickPixel("red") , 2,2);
+            $text_draw = new ImagickDraw();
+            $text_draw->setFontSize( 10 );
+            $text_draw->setFillColor('#ffffff');
+            $im->annotateImage( $text_draw, 10, 20, 0, "C/R {$col}/{$row}\nT{$tile} / L{$l}\nST/O " . (@$layer->starttile) . "/{$offset}\n{$debugTxt}");
+            $im->setImageFormat( "jpeg" );
+            echo $im;
+        }
+    }
+    
     public function image()
     {
-        $size = '(\^?max|\^?\d+\,|\^?\,\d+|\^?pct\:\d+|\^?!?\d+\,\d+)\/';
-        $region = '(full|square|(?:(?:pct\:)?\d+(?:\.\d+)?\,){3}\d+(?:\.\d+)?)\/';
         
         $getpic_info =  $this->getpic->info()->setSizes();
         $tiles = $getpic_info->getTiles();
         $sizes = $getpic_info->getSizes(true);
         
+        $pct = 0 === strpos($this->region, 'pct:');
+        if ($this->region === 'full') {
+            $region = "0,0,{$getpic_info->width},{$getpic_info->height}";
+        } elseif ($this->region == 'square') {
+            if ($getpic_info->width > $getpic_info->height) {
+                $x = abs(($getpic_info->width - $getpic_info->height) / 2);
+                $region = "{$x},0,{$getpic_info->width},{$getpic_info->height}";
+            } else {
+                $y = abs(($getpic_info->height - $getpic_info->width) / 2);
+                $region = "0,{$y},{$getpic_info->width},{$getpic_info->height}";
+            }
+        } elseif ($pct) {
+            $region = sprintf("%d,%d,%d,%d", [
+                round(($x/100) * $getpic_info->width),
+                round(($y/100) * $getpic_info->height),
+                round(($w/100) * $getpic_info->width),
+                round(($h/100) * $getpic_info->height)
+            ]);
+        } else {
+            $region = $this->region;
+        }
         
-         if(preg_match('/^(?:(?:pct\:)?\d+(?:\.\d+)?\,){3}\d+(?:\.\d+)?$/', $this->region, $match)) {
-        
-             //HACKED: Only serve tiles
-             $regions = explode(',', $this->region);
-             list($x, $y, $w, $h) = explode(',', $this->region);
-             $x = (int)$x; $y=(int)$y; $w=(int)$w; $h=(int)$h;
-             $debugTxt = "x:{$x}\ny:{$y}\nw:$w\nh:$h\nx/tw: " . ($x / $getpic_info->tilewidth);
-             $debugTxt .= "\nsize: {$this->size}\n";
-             // $x = 0; $y = 0; $w = 272; $h= 204;
-     
-             // echo("x, y, w, h = $x, $y, $w, $h\n");
-             if ($w % $getpic_info->tilewidth) {
-                 $w = $h;
-             }
-             if ($h % $getpic_info->tileheight) {
-                 $h = $w;
-             }
-
-             $l = 0;
-             for ($i = 0 ; $i < $getpic_info->layers; $i++) {
-                 $l = $i+1;
-                 $scale = pow($getpic_info->ratio, $l);
-                 // echo "$getpic_info->width / $scale <= $w && $getpic_info->height / $scale <= $h\n";
+        if(!preg_match('/^(?:(?:pct\:)?\d+(?:\.\d+)?\,){3}\d+(?:\.\d+)?$/', $region, $match)) {
+            throw new IIIF_Exception("Wrong region at a strange position (".__LINE__."), should have been tested when parsing query parameters.", 500);
+        }
+        list($x, $y, $w, $h) = explode(',', str_replace('pct:', '', $region));
          
-                 if ($getpic_info->width / $scale <= $w && $getpic_info->height / $scale <= $h) {
-                     break;
-                 }
-             }
-             $l = $l+1;
-             if ($l > $getpic_info->layers) $l = $getpic_info->layers;
-             $layer = @$sizes[$l];
-     
-     
-             $scale = pow($getpic_info->ratio, $getpic_info->layers - $l);
-             $x = ($x / $scale);
-             $y = ($y / $scale);
-             $col = ($x - ($x % $getpic_info->tilewidth)) / $getpic_info->tilewidth ;
-             $row = ($y - ($y % $getpic_info->tileheight)) / $getpic_info->tileheight;
-     
-             $offset = ($row) * @$layer->cols + $col;
-             $tile = @$layer->starttile + $offset;
-     
-             if (1) {
-                 header("Content-Type: image/jpeg");
-                 echo $this->getpic->getTile($tile, false);
-             } else {
-                 header("Content-Type: image/jpeg");
-                 $im = new Imagick();
-                 $im->newImage(256, 256, '#000');
-                 $im->BorderImage(new ImagickPixel("red") , 2,2);
-                 $text_draw = new ImagickDraw();
-                 $text_draw->setFontSize( 10 );
-                 $text_draw->setFillColor('#ffffff');
-                 // $text_draw->setGravity( Imagick::ALIGN_CENTER );
-                 $im->annotateImage( $text_draw, 10, 20, 0, "C/R {$col}/{$row}\nT{$tile} / L{$l}\nST/O " . (@$layer->starttile) . "/{$offset}\n{$debugTxt}");
-                 $im->setImageFormat( "jpeg" );
-                 echo $im;
-             }
-             exit;
-             
-             //This code is not working anymore:
-             $pct = 0 === strpos($this->region, 'pct:');
-             list($x, $y, $w, $h) = explode(',', str_replace('pct:', '', $this->region));
-             if ($pct) {
-                 $x = round(($x/100) * $getpic_info->width);
-                 $y = round(($y/100) * $getpic_info->height);
-                 $w = round(($w/100) * $getpic_info->width);
-                 $h = round(($h/100) * $getpic_info->height);
-             }
-             if ($w <= 0 || $h <= 0) throw new IIIF_Exception("Requested region’s height or width is zero", 400);
-             if ($x > $getpic_info->width || $y > $getpic_info->height) 
-                 throw new IIIF_Exception("Requested region is entirely outside the bounds of the reported dimensions", 400);
-             $image->cropImage($w, $h, $x, $y);
-         } else {
-             $layer = 3;
-             $image = $this->getpic->getLayer($layer, $this->quality);
-             $w = $getpic_info->width;
-             $h = $getpic_info->height;
-             if ($this->region === 'square') {
-                  if ($getpic_info->width > $getpic_info->height) {
-                      $x = abs(($getpic_info->width - $getpic_info->height) / 2);
-                      $image->cropImage($getpic_info->height, $getpic_info->height, $x, 0);
-                  } else {
-                      $y = abs(($getpic_info->height - $getpic_info->width) / 2);
-                      $image->cropImage($getpic_info->width, $getpic_info->width, 0, $y);
-                  }
-              }
+         // shortcut to tiles:
+         if (
+             !$pct && $this->region != 'full' && $this->region != 'square'
+                 && ( 
+                     (0 === $x % $getpic_info->tilewidth && 0 === $y % $getpic_info->tileheight)
+                     || (0 === $w % $getpic_info->tilewidth || $w < $getpic_info->tilewidth)
+                     || (0 === $h % $getpic_info->tileheight || $h < $getpic_info->tileheight)
+                )
+                     
+         ) {
+             return $this->tile($getpic_info, $tiles, $sizes);
          }
          
+         if ($w <= 0 || $h <= 0) throw new IIIF_Exception("Requested region’s height or width is zero", 400);
+         if ($x > $getpic_info->width || $y > $getpic_info->height) 
+             throw new IIIF_Exception("Requested region is entirely outside the bounds of the reported dimensions", 400);
          
+         $true_width = $w;
+         $true_height = $h;
+         $true_x = $x;
+         $true_y = $y;
+
+         $resize_args = false;
+
          if (preg_match('/^(\^?)(\!?)(\d*)?\,(\d*)?$/', $this->size, $match)) {
              $upscale = $match[1] == '^';
              $bestfit = $match[2] == '!';
              $rw = (int)$match[3];
              $rh = (int)$match[4];
              
-             if ($upscale && $bestfit) {
-                 throw new IIIF_Exception("Upscaling and Bestfit of regions is not yet implemented.", 501);
+             if ($upscale) {
+                 throw new IIIF_Exception("Upscaling is not implemented.", 501);
              }
-             if ($upscale && ($rw > $w || $rh > $h)) {
-                 throw new IIIF_Exception("Upscaling of regions is not yet implemented.", 501);
-             }
+
              if ($rw > $w) {
                  throw new IIIF_Exception("The value of w must not be greater than the width of the extracted region.", 400);
              }
+             
              if ($rh > $h) {
                  throw new IIIF_Exception("The value of h must not be greater than the height of the extracted region.", 400);
              }
-             $image->adaptiveResizeImage($rw, $rh, $bestfit);
+             $resize_args=[$rw, $rh, $bestfit];
          } elseif (preg_match('/^(\^?)pct:(\d+)$/', $this->size, $match)) {
              $upscale = $match[1] == '^';
              $pct = (int)$match[2];
-             if ($upscale && $pct > 100) {
-                 throw new IIIF_Exception("Upscaling of regions (pct>100) is not yet implemented.", 501);
+             $bestfit = false;
+
+             if ($upscale || $pct>100) {
+                 throw new IIIF_Exception("Upscaling is not implemented.", 501);
              }
+             if (round($pct) <= 0) {
+                 throw new IIIF_Exception("pct value must be greater than zero.", 400);
+             }
+             
              $rw = ($pct/100) * $getpic_info->width;
-             $image->adaptiveResizeImage($rw, 0);
+             $rw = ($pct/100) * $getpic_info->heght;
+             $resize_args=[$rw, $rh, $bestfit];
+         }
+         
+         
+         if ($rw) {
+             $scale = (int)round($true_width / $rw);
+         } elseif ($rh) {
+             $scale = (int)round($true_height / $rh);
+         } else {
+             $scale = 1;
+         }
+         $scaleFactors = array_reverse($tiles[0]['scaleFactors']);
+         
+         foreach ($scaleFactors as $i => $scaleFactor) {
+             $nLayer = $i+1;
+             if ($scale >= $scaleFactor) {
+                 break;
+             }
+         }
+         
+         $image = $this->getpic->getLayer($nLayer, $this->quality);
+    
+         $layer_width = $sizes[$nLayer]->width;
+         $layer_height = $sizes[$nLayer]->height;
+         
+         //calculate $scale based on this new image from layer:
+         $scale = pow($getpic_info->ratio, $nLayer);
+         $image->cropImage($w / $scale, $h / $scale, $x / $scale, $y / $scale);
+         if ($resize_args) {
+             call_user_func_array([$image, 'adaptiveResizeImage'], $resize_args);
          }
          
          if ($this->rotation && $this->rotation != 360) {
@@ -282,6 +348,7 @@ class IIIF
          } elseif ($this->quality == 'bitonal') {
              $image->setImageType(Imagick::IMGTYPE_BILEVEL);
          }
+         
         header("Content-Type: image/jpeg");
         echo $image;
         exit;
@@ -348,6 +415,11 @@ class IIIF
         if (!$this->mode) throw new IIIF_Exception("Unkown mode, please set one first");
         if (!$this->getpic) throw new IIIF_Exception("No file set");
         
+        header('Access-Control-Allow-Origin: *');
+        header("Access-Control-Allow-Methods: GET, POST, OPTIONS");
+        header('Access-Control-Allow-Headers: Accept,Accept-Encoding,Accept-Language,Connection,DNT,Host,Sec-GPC,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range');
+        header('Access-Control-Expose-Headers: Content-Length,Content-Range');
+
         if ($this->mode == self::MODE_IMG) {
             if (null === $this->region || null === $this->size || null === $this->rotation || null === $this->quality || null === $this->format) {
                 throw new IIIF_Exception("Missing one of the required Image params (region|size|rotation|quality|format)");
@@ -408,17 +480,18 @@ class IIIF_Getpic
         }
     }
     
-    public function getTile($tile)
+    public function getTile($tile, $returnAsImageObject = true)
     {
         $output = array();
         $err = array();
         $cmd = self::$getpic_bin . ' ' . intval($tile) . ' ' . escapeshellarg($this->file);
-        ob_start();
+        if ($returnAsImageObject) ob_start();
         passthru($cmd);
+        if (false === $returnAsImageObject) return;
         $blob = ob_get_contents();
         ob_end_clean();
         if (!$blob) throw new IIIF_Exception("getpic cmd `{$cmd}` failed", 500);
-
+        
         $tile = new Imagick();
         $tile->readImageBlob($blob);
         return $tile;
