@@ -44,7 +44,7 @@ class IIIF
         return new self();
     }
     
-    public function debug ($debug = true) {
+    public function setDebug ($debug) {
         $this->debug = (bool)$debug;
         return $this;
     }
