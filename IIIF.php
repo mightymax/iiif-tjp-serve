@@ -7,6 +7,9 @@ class IIIF
     protected $getpic;
     protected $debug = false;
     
+    protected $maxwidth = false;
+    protected $maxheight = false;
+    
     protected $isManifest = false;
     
     const MODE_INFO = 'info';
@@ -15,7 +18,7 @@ class IIIF
     
     protected $regex_pattern = array(
         'region' => '(full|square|(?:(?:pct\:)?\d+(?:\.\d+)?\,){3}\d+(?:\.\d+)?)\/',
-        'size' => '(\^?max|\^?\d+\,|\^?\,\d+|\^?pct\:\d+|\^?!?\d+\,\d+)\/',
+        'size' => '(\^?max|full|\^?\d+\,|\^?\,\d+|\^?pct\:\d+|\^?!?\d+\,\d+)\/',
         'rotation' => '(!?\d+(?:\.\d+)?)\/',
         'quality' => '(default|color|gray|bitonal|native)\.',
         'format' => '(jpg|png|tif|gif|jp2|pdf|webp)'
@@ -52,6 +55,26 @@ class IIIF
         return $this;
     }
     
+    public function setMaxwidth($val)
+    {
+        if (is_numeric($val)) {
+            $this->maxwidth = (int)$val;
+        } else {
+            throw new IIIF_Exception("Config parameter error: maxwidth should be a number", 500); 
+        }
+        return $this;
+    }
+    
+    public function setMaxheight($val)
+    {
+        if (is_numeric($val)) {
+            $this->maxheight = (int)$val;
+        } else {
+            throw new IIIF_Exception("Config parameter error: maxheight should be a number", 500); 
+        }
+        return $this;
+    }
+    
     public function parseQueryString($queryString)
     {
         if (!$queryString) throw new IIIF_Exception("Empty queryString");
@@ -67,7 +90,7 @@ class IIIF
         } elseif (preg_match($pattern, $queryString, $matches)) {
             list(,$region, $size, $rotation, $quality, $format) = $matches;
             $this->setFile(implode('/', explode('/', $queryString, -1 * (count($matches)-2))));
-            $this->setMode(self::MODE_IMG)->setRegion($region)->setSize($size)->setRotation($rotation)->setQuality($quality)->setFormat($format);
+            $this->setMode(self::MODE_IMG)->setRegion($region, $matches)->setSize($size, $matches)->setRotation($rotation, $matches)->setQuality($quality, $matches)->setFormat($format, $matches);
         } else {
             throw new IIIF_Exception("Wrong queryString: {$queryString}\npattern: {$pattern}");
         }
@@ -98,27 +121,79 @@ class IIIF
         return $this;
     }
     
-    public function setRegion($region)
+    public function setRegion($region, Array $matches = [])
     {
         return $this->setParam('region', $region);
     }
     
-    public function setSize($size)
+    public function setSize($size, Array $matches = [])
     {
+        if ($size == 'full') {
+            if ($this->maxwidth || $this->maxheight) {
+                $size = sprintf("%s,%s", $this->maxwidth ? $this->maxwidth : '', $this->maxheight ? $this->maxheight : '');
+            }
+        }
+        
         return $this->setParam('size', $size);
     }
     
-    public function setRotation($rotation)
+    protected function parseSize($w, $h)
+    {
+        $resize_args = false;
+        if (preg_match('/^(\^?)(\!?)(\d*)?\,(\d*)?$/', $this->size, $match)) {
+            $upscale = $match[1] == '^';
+            $bestfit = $match[2] == '!';
+            $rw = (int)$match[3];
+            $rh = (int)$match[4];
+            
+            if ($upscale) {
+                throw new IIIF_Exception("Upscaling is not implemented.", 501);
+            }
+
+            if ($rw > $w) {
+                throw new IIIF_Exception("The value of w must not be greater than the width of the extracted region.", 400);
+            }
+            
+            if ($rh > $h) {
+                throw new IIIF_Exception("The value of h must not be greater than the height of the extracted region.", 400);
+            }
+            $resize_args=[$rw, $rh, $bestfit];
+        } elseif (preg_match('/^(\^?)pct:(\d+)$/', $this->size, $match)) {
+            $upscale = $match[1] == '^';
+            $pct = (int)$match[2];
+            $bestfit = false;
+
+            if ($upscale || $pct>100) {
+                throw new IIIF_Exception("Upscaling is not implemented.", 501);
+            }
+            if (round($pct) <= 0) {
+                throw new IIIF_Exception("pct value must be greater than zero.", 400);
+            }
+            
+            $rw = ($pct/100) * $getpic_info->width;
+            $rw = ($pct/100) * $getpic_info->heght;
+            $resize_args=[$rw, $rh, $bestfit];
+        }
+        
+        if ($resize_args) {
+            if ($rw + $rh == 0)      throw new IIIF_Exception("The provided arguments result in an empty image.", 400);
+            if ($this->maxwidth && $rw > $this->maxwidth) throw new IIIF_Exception("By configuration we limit the width to {$this->maxwidth}px.", 404);
+            if ($this->maxheight && $rw > $this->maxheight) throw new IIIF_Exception("By configuration we limit the width to {$this->maxheight}px.", 404);
+        }
+        return $resize_args;
+    }
+    
+    public function setRotation($rotation, Array $matches = [])
     {
         return $this->setParam('rotation', $rotation);
     }
     
-    public function setQuality($quality)
+    public function setQuality($quality, Array $matches = [])
     {
         return $this->setParam('quality', $quality);
     }
     
-    public function setFormat($format)
+    public function setFormat($format, Array $matches = [])
     {
         $allowed_format = ['jpg'];
         if (!in_array($format, $allowed_format)) {
@@ -127,7 +202,7 @@ class IIIF
         return $this->setParam('format', $format);
     }
     
-    public function setMode($mode)
+    public function setMode($mode, Array $matches = [])
     {
         if ($mode === self::MODE_IMG || $mode === self::MODE_INFO || $mode === self::MODE_MANIFEST) {
             $this->mode = $mode;
@@ -145,7 +220,7 @@ class IIIF
             "@id" => "http://home.lindeman.nu/iiif/image/?request=dam-ams/0dbda810-4099-ad94-278b-2e6c3f8f7d62.tjp",
             "protocol" => "http://iiif.io/api/image",
             'profile' => array(
-                'supports'  => array("canonicalLinkHeader", "profileLinkHeader", "mirroring", "rotationArbitrary"),
+                'supports'  => array('cors', 'mirroring', "rotationArbitrary", 'regionByPct', 'regionByPx', 'rotationBy90s', 'sizeByWhListed', 'sizeByForcedWh', 'sizeByH', 'sizeByPct', 'sizeByW', 'sizeByH'),
                 "qualities" => array("default", "bitonal", "gray", "color"), 
                 "formats"   => array("jpg") //, "png", "gif", "webp")
             ),
@@ -270,6 +345,7 @@ class IIIF
              return $this->tile($getpic_info, $tiles, $sizes);
          }
          
+         
          if ($w <= 0 || $h <= 0) throw new IIIF_Exception("Requested region’s height or width is zero", 400);
          if ($x > $getpic_info->width || $y > $getpic_info->height) 
              throw new IIIF_Exception("Requested region is entirely outside the bounds of the reported dimensions", 400);
@@ -279,58 +355,30 @@ class IIIF
          $true_x = $x;
          $true_y = $y;
 
-         $resize_args = false;
-
-         if (preg_match('/^(\^?)(\!?)(\d*)?\,(\d*)?$/', $this->size, $match)) {
-             $upscale = $match[1] == '^';
-             $bestfit = $match[2] == '!';
-             $rw = (int)$match[3];
-             $rh = (int)$match[4];
-             
-             if ($upscale) {
-                 throw new IIIF_Exception("Upscaling is not implemented.", 501);
-             }
-
-             if ($rw > $w) {
-                 throw new IIIF_Exception("The value of w must not be greater than the width of the extracted region.", 400);
-             }
-             
-             if ($rh > $h) {
-                 throw new IIIF_Exception("The value of h must not be greater than the height of the extracted region.", 400);
-             }
-             $resize_args=[$rw, $rh, $bestfit];
-         } elseif (preg_match('/^(\^?)pct:(\d+)$/', $this->size, $match)) {
-             $upscale = $match[1] == '^';
-             $pct = (int)$match[2];
-             $bestfit = false;
-
-             if ($upscale || $pct>100) {
-                 throw new IIIF_Exception("Upscaling is not implemented.", 501);
-             }
-             if (round($pct) <= 0) {
-                 throw new IIIF_Exception("pct value must be greater than zero.", 400);
-             }
-             
-             $rw = ($pct/100) * $getpic_info->width;
-             $rw = ($pct/100) * $getpic_info->heght;
-             $resize_args=[$rw, $rh, $bestfit];
-         }
+         $resize_args = $this->parseSize($w, $h);
          
+         $scaleFactors = array_reverse($tiles[0]['scaleFactors']);
+
+         if ($resize_args) {
+             list($rw, $rh, $bestfit) = $resize_args;
          
-         if ($rw) {
-             $scale = (int)round($true_width / $rw);
-         } elseif ($rh) {
-             $scale = (int)round($true_height / $rh);
+             if ($rw) {
+                 $scale = (int)round($true_width / $rw);
+             } elseif ($rh) {
+                 $scale = (int)round($true_height / $rh);
+             } else {
+                 $scale = 1;
+             }
+         
+             foreach ($scaleFactors as $i => $scaleFactor) {
+                 $nLayer = $i+1;
+                 if ($scale >= $scaleFactor) {
+                     break;
+                 }
+             }
          } else {
              $scale = 1;
-         }
-         $scaleFactors = array_reverse($tiles[0]['scaleFactors']);
-         
-         foreach ($scaleFactors as $i => $scaleFactor) {
-             $nLayer = $i+1;
-             if ($scale >= $scaleFactor) {
-                 break;
-             }
+             $nLayer = $getpic_info->layers;
          }
          
          $image = $this->getpic->getLayer($nLayer, $this->quality);
@@ -339,8 +387,11 @@ class IIIF
          $layer_height = $sizes[$nLayer]->height;
          
          //calculate $scale based on this new image from layer:
-         $scale = pow($getpic_info->ratio, $nLayer);
-         $image->cropImage($w / $scale, $h / $scale, $x / $scale, $y / $scale);
+         $scale = $scaleFactors[$nLayer - 1];
+         if ($x && $y && $layer_width != ($w / $scale) && $layer_height != ($h / $scale)) {
+             $image->cropImage($w / $scale, $h / $scale, $x / $scale, $y / $scale);
+         }
+
          if ($resize_args) {
              call_user_func_array([$image, 'adaptiveResizeImage'], $resize_args);
          }
