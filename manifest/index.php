@@ -6,8 +6,8 @@ require_once '../IIIF.php';
 
 try {
     $iiif = IIIF::Factory()
-        ->parseQueryString(@$_GET['request'])
         ->setMode(IIIF::MODE_MANIFEST)
+        ->parseQueryString(@$_GET['request'])
         ->cache()
         ->sendResponse();
 } catch (IIIF_Exception $e) {

@@ -214,10 +214,13 @@ class IIIF
     
     protected function info()
     {
+        $iiifUrl = 'http' . ($_SERVER['SERVER_PORT'] == 80 ? '' : 's') . '://' . $_SERVER['HTTP_HOST'] . str_replace('/manifest', '/image', $_SERVER['DOCUMENT_URI']);
+        $iiifUrl .= '?request=' . $this->file;
+
         $getpic_info =  $this->getpic->info();
         $info= array(
             "@context" => "http://iiif.io/api/image/2/context.json",
-            "@id" => "http://home.lindeman.nu/iiif/image/?request=dam-ams/0dbda810-4099-ad94-278b-2e6c3f8f7d62.tjp",
+            "@id" => $iiifUrl,
             "protocol" => "http://iiif.io/api/image",
             'profile' => array(
                 'supports'  => array('cors', 'mirroring', "rotationArbitrary", 'regionByPct', 'regionByPx', 'rotationBy90s', 'sizeByWhListed', 'sizeByForcedWh', 'sizeByH', 'sizeByPct', 'sizeByW', 'sizeByH'),
